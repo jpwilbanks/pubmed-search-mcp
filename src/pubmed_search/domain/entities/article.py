@@ -60,6 +60,24 @@ _RCR_MEDIUM = 0.5
 _CITATION_HIGH = 100
 _CITATION_MEDIUM = 10
 
+# Month abbreviation map for date parsing
+_MONTH_ABBREV = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
+    "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
+    "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _parse_month(s: str) -> int | None:
+    """Convert a month string (name or number) to an integer 1-12, or None."""
+    if not s:
+        return None
+    if s.isdigit():
+        m = int(s)
+        return m if 1 <= m <= 12 else None
+    return _MONTH_ABBREV.get(s.strip()[:3].capitalize())
+
+
 # Author display limits
 _AUTHOR_DISPLAY_MAX = 3
 _APA_AUTHOR_MAX = 7
@@ -578,19 +596,48 @@ class UnifiedArticle:
         # Parse date
         pub_date = None
         year = None
+
         if data.get("pub_date"):
             try:
-                # Try various formats
-                date_str = data["pub_date"]
-                if isinstance(date_str, str):
-                    # "2024", "2024 Jan", "2024 Jan 15"
-                    year_match = re.match(r"(\d{4})", date_str)
-                    if year_match:
-                        year = int(year_match.group(1))
+                date_str = str(data["pub_date"]).strip()
+                # Normalise separators: "2026 Jan 15" → ["2026", "Jan", "15"]
+                parts = date_str.replace("-", "/").split("/")
+                # Also handle space-separated: "2026 Jan 15"
+                if len(parts) == 1:
+                    parts = date_str.split()
+                if parts and parts[0].isdigit():
+                    year = int(parts[0])
+                    if len(parts) >= 2:
+                        month_num = _parse_month(parts[1].strip())
+                        if month_num:
+                            day_num = 1
+                            if len(parts) >= 3 and parts[2].strip().isdigit():
+                                day_num = int(parts[2].strip())
+                            with contextlib.suppress(ValueError):
+                                pub_date = date(year, month_num, day_num)
             except (ValueError, TypeError):
                 pass
+
+        # Fallback: build date from separate month/day fields if present
+        if not pub_date and data.get("month"):
+            try:
+                y = year or (int(data["year"]) if data.get("year") else None)
+                month_num = _parse_month(str(data["month"]).strip())
+                if y and month_num:
+                    day_str = str(data.get("day", "")).strip()
+                    day_num = int(day_str) if day_str.isdigit() else 1
+                    with contextlib.suppress(ValueError):
+                        pub_date = date(y, month_num, day_num)
+                    if not year:
+                        year = y
+            except (ValueError, TypeError):
+                pass
+
         if not year and data.get("year"):
-            year = int(data["year"])
+            try:
+                year = int(data["year"])
+            except (ValueError, TypeError):
+                pass
 
         # Parse article type
         article_type = ArticleType.UNKNOWN
