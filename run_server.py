@@ -37,6 +37,88 @@ from pubmed_search.presentation.mcp_server.server import create_server
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# ── Copilot Studio Compatibility Middleware ───────────────────────────────────
+# Fixes two Python MCP SDK issues for Copilot Studio:
+#   1. SDK converts string JSON-RPC IDs to integers; Copilot Studio requires
+#      matching string IDs (GitHub: modelcontextprotocol/python-sdk#961)
+#   2. Copilot Studio may omit the Accept header required by the SDK
+# ─────────────────────────────────────────────────────────────────────────────
+import json as _json
+
+
+class CopilotStudioFixMiddleware:
+    """ASGI middleware to ensure Copilot Studio compatibility."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            if b"accept" not in headers:
+                scope = dict(scope)
+                scope["headers"] = list(scope["headers"]) + [
+                    (b"accept", b"application/json, text/event-stream")
+                ]
+
+            response_body = bytearray()
+
+            async def send_wrapper(message):
+                nonlocal response_body
+                if message["type"] == "http.response.start":
+                    send_wrapper._start_message = message
+                elif message["type"] == "http.response.body":
+                    body = message.get("body", b"")
+                    response_body.extend(body)
+                    more_body = message.get("more_body", False)
+                    if not more_body:
+                        fixed = _fix_id(bytes(response_body))
+                        start = send_wrapper._start_message
+                        if fixed != bytes(response_body):
+                            new_headers = []
+                            for k, v in start["headers"]:
+                                if k.lower() == b"content-length":
+                                    v = str(len(fixed)).encode()
+                                new_headers.append((k, v))
+                            start = dict(start)
+                            start["headers"] = new_headers
+                        await send(start)
+                        await send({
+                            "type": "http.response.body",
+                            "body": fixed,
+                            "more_body": False,
+                        })
+                        return
+                else:
+                    await send(message)
+                    return
+
+            send_wrapper._start_message = None
+            await self.app(scope, receive, send_wrapper)
+        else:
+            await self.app(scope, receive, send)
+
+
+def _fix_id(body: bytes) -> bytes:
+    """Convert integer JSON-RPC id to string if needed."""
+    try:
+        data = _json.loads(body)
+        changed = False
+        if isinstance(data, dict) and "id" in data and isinstance(data["id"], int):
+            data["id"] = str(data["id"])
+            changed = True
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "id" in item and isinstance(item["id"], int):
+                    item["id"] = str(item["id"])
+                    changed = True
+        if changed:
+            return _json.dumps(data, separators=(",", ":")).encode()
+    except Exception:
+        pass
+    return body
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run PubMed Search MCP Server in HTTP mode")
@@ -85,7 +167,11 @@ def main():
     logger.info(f"  Port: {args.port}")
     logger.info(f"  DNS Rebinding Protection: {'Disabled' if args.no_security else 'Enabled'}")
 
-    server = create_server(email=args.email, api_key=args.api_key, disable_security=args.no_security)
+    # Patch 2: stateless_http + json_response required for Copilot Studio
+    server = create_server(
+        email=args.email, api_key=args.api_key,
+        disable_security=args.no_security,
+        stateless_http=True, json_response=True)
 
     # Run server with selected transport
     logger.info(f"Starting server at http://{args.host}:{args.port}")
@@ -320,9 +406,11 @@ def main():
         StarletteRoute("/api/session/summary", api_session_summary),
     ]
 
-    # Prepend our routes to the MCP app's routes
-    # This way /mcp still works (from MCP SDK) and our routes work too
-    mcp_app.routes = additional_routes + list(mcp_app.routes)
+    # Patch 1: use router.routes (mcp_app.routes is read-only in newer Starlette)
+    mcp_app.router.routes = additional_routes + list(mcp_app.router.routes)
+
+    # Patch 3: wrap with Copilot Studio compatibility middleware
+    mcp_app = CopilotStudioFixMiddleware(mcp_app)
 
     # Use mcp_app directly (preserves lifespan handling)
     app = mcp_app
