@@ -58,8 +58,10 @@ class UtilsMixin:
                     author_list = summary.get("AuthorList", [])
                     authors = [str(author) for author in author_list]
 
-                    pub_date = summary.get("PubDate", "")
-                    year = pub_date.split()[0] if pub_date else ""
+                    pub_date_raw = summary.get("PubDate", "")
+                    pub_date_parts = pub_date_raw.split() if pub_date_raw else []
+                    year = pub_date_parts[0] if pub_date_parts else ""
+                    pub_date_str = "/".join(pub_date_parts) if pub_date_parts else ""
 
                     results.append(
                         {
@@ -68,6 +70,7 @@ class UtilsMixin:
                             "authors": authors,
                             "journal": str(summary.get("Source", "")),
                             "year": year,
+                            "pub_date": pub_date_str,
                             "doi": str(summary.get("DOI", "")),
                             "pmc_id": str(summary.get("PMCID", "")),
                         }
